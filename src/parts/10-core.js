@@ -14,11 +14,16 @@ const NEON = { pink: 0xff2bd6, cyan: 0x00e5ff, purple: 0x9b5cff, orange: 0xff8a1
 
 const URL_PARAMS = new URLSearchParams(window.location.search);
 
+// Troubleshooting switches for graphics drivers that draw something wrongly (e.g. index.html?nomsaa). ?safe turns all of them on.
+//   ?nomsaa  no multisampled render targets     ?ldr  8 bit instead of half-float render targets (no glow above white)
+//   ?nobloom no bloom pass                       ?pr1  render at 1 pixel per CSS pixel, whatever the display scaling
+const urlFlag = (name) => URL_PARAMS.has(name) || URL_PARAMS.has('safe');
+
 // Runtime quality knobs. The render part may lower these automatically if the frame rate is poor.
 const QUALITY = {
   level: 2,                                               // 2 = high, 1 = medium, 0 = low
-  pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-  bloom: true,
+  pixelRatio: urlFlag('pr1') ? 1 : Math.min(window.devicePixelRatio || 1, 2),
+  bloom: !urlFlag('nobloom'),
   adapt: !URL_PARAMS.has('noadapt'),                      // ?noadapt disables auto-downgrade (used by tests)
 };
 

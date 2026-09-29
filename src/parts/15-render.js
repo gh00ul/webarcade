@@ -135,7 +135,7 @@ function setupRenderPipeline() {
 
   // Multisampled half-float target: anti-aliased HDR so bright neon can bloom. GPUs that cannot render to float
   // textures (no EXT_color_buffer_float / _half_float) fall back to 8 bit: no glow above white, but no black screen.
-  const hdr = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
+  const hdr = !urlFlag('ldr') && (renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float'));
   const target = new THREE.WebGLRenderTarget(1, 1, { type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType, samples: 4 });
   composer = new EffectComposer(renderer, target);
   composer.addPass(new RenderPass(scene, camera));
@@ -169,8 +169,9 @@ function applyQualityLevel(level) {
   gradePass.uniforms.uChroma.value = q.chroma ? GRADE.chroma : 0;
 
   // Changing the MSAA sample count means re-creating the framebuffers: dispose, three.js rebuilds them lazily.
+  const samples = urlFlag('nomsaa') ? 0 : q.samples;
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) {
-    if (rt.samples !== q.samples) { rt.samples = q.samples; rt.dispose(); }
+    if (rt.samples !== samples) { rt.samples = samples; rt.dispose(); }
   }
   resizeRender(renderWidth, renderHeight);
 }
