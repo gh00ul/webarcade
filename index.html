@@ -109,11 +109,16 @@ const NEON = { pink: 0xff2bd6, cyan: 0x00e5ff, purple: 0x9b5cff, orange: 0xff8a1
 
 const URL_PARAMS = new URLSearchParams(window.location.search);
 
+// Troubleshooting switches for graphics drivers that draw something wrongly (e.g. index.html?nomsaa). ?safe turns all of them on.
+//   ?nomsaa  no multisampled render targets     ?ldr  8 bit instead of half-float render targets (no glow above white)
+//   ?nobloom no bloom pass                       ?pr1  render at 1 pixel per CSS pixel, whatever the display scaling
+const urlFlag = (name) => URL_PARAMS.has(name) || URL_PARAMS.has('safe');
+
 // Runtime quality knobs. The render part may lower these automatically if the frame rate is poor.
 const QUALITY = {
   level: 2,                                               // 2 = high, 1 = medium, 0 = low
-  pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-  bloom: true,
+  pixelRatio: urlFlag('pr1') ? 1 : Math.min(window.devicePixelRatio || 1, 2),
+  bloom: !urlFlag('nobloom'),
   adapt: !URL_PARAMS.has('noadapt'),                      // ?noadapt disables auto-downgrade (used by tests)
 };
 
@@ -345,7 +350,7 @@ function setupRenderPipeline() {
 
   // Multisampled half-float target: anti-aliased HDR so bright neon can bloom. GPUs that cannot render to float
   // textures (no EXT_color_buffer_float / _half_float) fall back to 8 bit: no glow above white, but no black screen.
-  const hdr = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
+  const hdr = !urlFlag('ldr') && (renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float'));
   const target = new THREE.WebGLRenderTarget(1, 1, { type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType, samples: 4 });
   composer = new EffectComposer(renderer, target);
   composer.addPass(new RenderPass(scene, camera));
@@ -379,8 +384,9 @@ function applyQualityLevel(level) {
   gradePass.uniforms.uChroma.value = q.chroma ? GRADE.chroma : 0;
 
   // Changing the MSAA sample count means re-creating the framebuffers: dispose, three.js rebuilds them lazily.
+  const samples = urlFlag('nomsaa') ? 0 : q.samples;
   for (const rt of [composer.renderTarget1, composer.renderTarget2]) {
-    if (rt.samples !== q.samples) { rt.samples = q.samples; rt.dispose(); }
+    if (rt.samples !== samples) { rt.samples = samples; rt.dispose(); }
   }
   resizeRender(renderWidth, renderHeight);
 }
