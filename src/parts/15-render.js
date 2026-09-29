@@ -1,9 +1,14 @@
 // ═══════════════ RENDER PIPELINE: composer, bloom, colour grade, resize, adaptive quality ═══════════════
 // Owner: look agent. Entry points used by other parts: setupRenderPipeline(), resizeRender(w,h), renderFrame(dt).
 //
-// Pass chain (all in a multisampled half-float HDR target):
-//   RenderPass -> UnrealBloomPass -> OutputPass (tone mapping + sRGB) -> grade ShaderPass (screen)
+// Pass chain (half-float HDR targets):
+//   SceneMsaaPass -> UnrealBloomPass -> OutputPass (tone mapping + sRGB) -> grade ShaderPass (screen)
+// The scene is drawn into its own multisampled target and copied into the composer's plain (single-sample) buffer, and the bloom
+// glow is blended onto that plain buffer. Blending onto a multisampled half-float target left a big black rectangle on some graphics
+// drivers (any one of: no MSAA, 8 bit target, no bloom made it go away).
 // The grade runs AFTER tone mapping, in display space, so its contrast / split-tone curves behave predictably.
+//@@import import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+//@@import import { CopyShader } from 'three/addons/shaders/CopyShader.js';
 
 // ── Tuning constants ──────────────────────────────────────────────────────────────────────────
 const RENDER_TONE_MAPPING = THREE.ACESFilmicToneMapping;   // filmic roll-off: deep blacks, neon cores go hot-white (art direction assumes ACES)
@@ -117,8 +122,38 @@ const GradeShader = {
     }`,
 };
 
+// ── Scene pass ────────────────────────────────────────────────────────────────────────────────
+// Draws the scene into its own multisampled target (three.js resolves it into the target's texture), then copies that resolved
+// image into the composer's read buffer, like RenderPass would have drawn it there. Everything after this pass only ever
+// touches single-sample targets.
+class SceneMsaaPass extends Pass {
+  constructor(scene, camera, type, samples) {
+    super();
+    this.needsSwap = false;                                  // the result stays in readBuffer, as with RenderPass
+    this.renderPass = new RenderPass(scene, camera);
+    this.target = new THREE.WebGLRenderTarget(1, 1, { type, samples });
+    this.copyQuad = new FullScreenQuad(new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.clone(CopyShader.uniforms),
+      vertexShader: CopyShader.vertexShader, fragmentShader: CopyShader.fragmentShader,
+      blending: THREE.NoBlending, depthTest: false, depthWrite: false,
+    }));
+  }
+  setSize(w, h) { this.target.setSize(Math.max(1, Math.floor(w)), Math.max(1, Math.floor(h))); }
+  render(renderer, writeBuffer, readBuffer) {
+    this.renderPass.render(renderer, writeBuffer, this.target);
+    this.copyQuad._mesh.material.uniforms.tDiffuse.value = this.target.texture;
+    renderer.setRenderTarget(readBuffer);
+    this.copyQuad.render(renderer);
+  }
+  dispose() {
+    this.target.dispose();
+    this.copyQuad._mesh.material.dispose();
+    this.copyQuad.dispose();
+  }
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────────────────────
-let composer, bloomPass, gradePass;
+let composer, scenePass, bloomPass, gradePass;
 let renderWidth = window.innerWidth, renderHeight = window.innerHeight;   // CSS pixels of the last resize
 let gradeTime = 0;
 let contextLost = false;
@@ -133,12 +168,14 @@ function setupRenderPipeline() {
   renderer.toneMapping = RENDER_TONE_MAPPING;
   renderer.toneMappingExposure = RENDER_EXPOSURE;
 
-  // Multisampled half-float target: anti-aliased HDR so bright neon can bloom. GPUs that cannot render to float
-  // textures (no EXT_color_buffer_float / _half_float) fall back to 8 bit: no glow above white, but no black screen.
+  // Half-float targets: HDR so bright neon can bloom. GPUs that cannot render to float textures (no EXT_color_buffer_float /
+  // _half_float) fall back to 8 bit: no glow above white, but no black screen. The composer's own targets are single-sample;
+  // the anti-aliasing (MSAA) lives in the scene pass's target, whose sample count applyQualityLevel sets.
   const hdr = !urlFlag('ldr') && (renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float'));
-  const target = new THREE.WebGLRenderTarget(1, 1, { type: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType, samples: 4 });
-  composer = new EffectComposer(renderer, target);
-  composer.addPass(new RenderPass(scene, camera));
+  const type = hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
+  composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false }));
+  scenePass = new SceneMsaaPass(scene, camera, type, 0);
+  composer.addPass(scenePass);
 
   bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD);
   composer.addPass(bloomPass);
@@ -170,9 +207,7 @@ function applyQualityLevel(level) {
 
   // Changing the MSAA sample count means re-creating the framebuffers: dispose, three.js rebuilds them lazily.
   const samples = urlFlag('nomsaa') ? 0 : q.samples;
-  for (const rt of [composer.renderTarget1, composer.renderTarget2]) {
-    if (rt.samples !== samples) { rt.samples = samples; rt.dispose(); }
-  }
+  if (scenePass.target.samples !== samples) { scenePass.target.samples = samples; scenePass.target.dispose(); }
   resizeRender(renderWidth, renderHeight);
 }
 
@@ -232,7 +267,7 @@ function renderFrame(dt) {
 function precompileScene() {
   const finish = (p) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, 15000))]).catch(() => {});
   try {
-    renderer.setRenderTarget(composer.renderTarget1);      // the scene is drawn into the HDR target: its programs differ from canvas ones
+    renderer.setRenderTarget(scenePass.target);            // the scene is drawn into the HDR target: its programs differ from canvas ones
     let p = Promise.resolve();
     if (renderer.extensions.has('KHR_parallel_shader_compile')) p = renderer.compileAsync(scene, camera);
     else renderer.compile(scene, camera);                  // no parallel compile: still do it all now rather than in the middle of play
